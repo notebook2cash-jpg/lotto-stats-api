@@ -1,0 +1,38 @@
+{
+  "lottery": "thai_government",
+  "lottery_name": "หวยรัฐบาลไทย",
+  "source_url": "https://exphuay.com/calculate/goverment",
+  "fetched_at": "2026-01-30T14:49:06.196+00:00",
+  "window": {
+    "latest_n_draws": 30
+  },
+  "top2": {
+    "most_common": [
+      {
+        "number": "00",
+        "count": 0
+      }
+    ],
+    "frequency_table": [
+      {
+        "number": "00",
+        "count": 0
+      }
+    ]
+  },
+  "top3": {
+    "most_common": [
+      {
+        "number": "000",
+        "count": 0
+      }
+    ],
+    "frequency_table": [
+      {
+        "number": "000",
+        "count": 0
+      }
+    ]
+  },
+  "notes": ""
+}
