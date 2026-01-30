@@ -6,6 +6,7 @@ const TARGET = {
   key: "thai_government",
   name: "หวยรัฐบาลไทย",
   url: "https://exphuay.com/calculate/goverment",
+  out: "public/gov_thai.json",
 };
 
 /* ================= UTILS ================= */
@@ -26,9 +27,11 @@ async function fetchHtml(url) {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
       accept: "text/html",
       "accept-language": "th-TH,th;q=0.9,en;q=0.8",
+      "cache-control": "no-cache",
+      pragma: "no-cache",
     },
   });
-  if (!res.ok) throw new Error(`Fetch failed ${res.status}`);
+  if (!res.ok) throw new Error(`Fetch failed ${res.status} ${url}`);
   return await res.text();
 }
 
@@ -39,63 +42,79 @@ function cleanText(html) {
     .replace(/<\/?[^>]+>/g, " ")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 12000);
+    .slice(0, 14000);
 }
 
-async function callOpenAI(text) {
+async function callOpenAI({ lotteryName, sourceUrl, fetchedAt, text }) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("Missing OPENAI_API_KEY");
 
-  const body = {
-    model: "gpt-5",
-    input: [
-      {
-        role: "system",
-        content:
-          "Extract lottery statistics. Return ONLY valid JSON.",
-      },
-      {
-        role: "user",
-        content: `
-LOTTERY: หวยรัฐบาลไทย
-SOURCE_URL: ${TARGET.url}
-FETCHED_AT: ${nowISO()}
+  const prompt = `
+สรุป/คำนวณสถิติจากหน้าเว็บ "คำนวณหวย" ที่แนบให้
 
-TASK:
-- วิเคราะห์สถิติหวยรัฐบาลไทย 30 งวดล่าสุด
-- ความถี่เลข 2 ตัว
-- ความถี่เลข 3 ตัว
-- สรุปเลขเด่น
+เงื่อนไข:
+- ตอบกลับเป็น JSON เท่านั้น (ห้ามมีข้อความนอก JSON)
+- ใช้ข้อมูลจาก TEXT ที่ให้เท่านั้น ห้ามเดาเพิ่ม
+- สรุป "30 งวดล่าสุด" (ถ้าใน TEXT มีน้อยกว่า 30 ให้ใช้เท่าที่มี)
+
+ให้ output JSON รูปแบบนี้เท่านั้น:
+{
+  "lottery": "thai_government",
+  "lottery_name": "${lotteryName}",
+  "source_url": "${sourceUrl}",
+  "fetched_at": "${fetchedAt}",
+  "window": { "latest_n_draws": 30 },
+  "top2": {
+    "most_common": [{"number":"00","count":0}],
+    "frequency_table": [{"number":"00","count":0}]
+  },
+  "top3": {
+    "most_common": [{"number":"000","count":0}],
+    "frequency_table": [{"number":"000","count":0}]
+  },
+  "notes": ""
+}
 
 TEXT:
 ${text}
-        `,
-      },
-    ],
-  };
+`.trim();
 
-  const res = await fetch("https://api.openai.com/v1/responses", {
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
-      authorization: `Bearer ${apiKey}`,
-      "content-type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You output ONLY valid JSON. No markdown. No extra text.",
+        },
+        { role: "user", content: prompt },
+      ],
+    }),
   });
 
   if (!res.ok) {
-    throw new Error(`OpenAI ${res.status}`);
+    const t = await res.text().catch(() => "");
+    throw new Error(`OpenAI ${res.status}: ${t}`);
   }
 
   const data = await res.json();
-  const out =
-    data.output_text ??
-    data.output?.flatMap((o) => o.content || [])?.find(
-      (c) => c.type === "output_text"
-    )?.text;
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) throw new Error("No content from OpenAI");
 
-  if (!out) throw new Error("No output from OpenAI");
-  return JSON.parse(out);
+  // กันเคสโมเดลเผลอใส่ ```json
+  const cleaned = content
+    .replace(/```json/gi, "")
+    .replace(/```/g, "")
+    .trim();
+
+  return JSON.parse(cleaned);
 }
 
 /* ================= MAIN ================= */
@@ -104,21 +123,23 @@ async function main() {
   const html = await fetchHtml(TARGET.url);
   const text = cleanText(html);
 
-  const stats = await callOpenAI(text);
+  const stats = await callOpenAI({
+    lotteryName: TARGET.name,
+    sourceUrl: TARGET.url,
+    fetchedAt: nowISO(),
+    text,
+  });
 
-  const result = {
-    lottery: TARGET.key,
-    source_url: TARGET.url,
-    updated_at: nowISO(),
-    stats,
-  };
+  // normalize
+  stats.lottery = "thai_government";
+  stats.lottery_name = TARGET.name;
+  stats.source_url = TARGET.url;
+  stats.fetched_at = stats.fetched_at || nowISO();
+  stats.window = stats.window || { latest_n_draws: 30 };
+  if (!stats.window.latest_n_draws) stats.window.latest_n_draws = 30;
 
   await fs.mkdir("public", { recursive: true });
-  await fs.writeFile(
-    "public/gov_thai.json",
-    JSON.stringify(result, null, 2),
-    "utf8"
-  );
+  await fs.writeFile(TARGET.out, JSON.stringify(stats, null, 2), "utf8");
 }
 
 main().catch((err) => {
