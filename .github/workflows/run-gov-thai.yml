@@ -1,7 +1,10 @@
-name: Run Gov Thai Stats (manual)
+name: Run Gov Thai Stats
 
 on:
   workflow_dispatch: {}
+  schedule:
+    # วันที่ 2 และ 17 ของทุกเดือน เวลา 09:00 ไทย (02:00 UTC)
+    - cron: "0 2 2,17 * *"
 
 permissions:
   contents: write
@@ -17,8 +20,6 @@ jobs:
           node-version: 20
 
       - name: Run script
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: node scripts/gov_thai_stats.mjs
 
       - name: Commit & push if changed
