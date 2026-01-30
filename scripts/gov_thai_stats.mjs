@@ -2,22 +2,12 @@ import fs from "node:fs/promises";
 
 /* ================= CONFIG ================= */
 
-const TARGET = {
-  key: "thai_government",
-  name: "หวยรัฐบาลไทย",
-  url: "https://exphuay.com/calculate/goverment",
-  out: "public/gov_thai.json",
-};
+const TARGET_URL = "https://exphuay.com/calculate/goverment";
 
 /* ================= UTILS ================= */
 
 function nowISO() {
-  const d = new Date();
-  const tz = -d.getTimezoneOffset();
-  const sign = tz >= 0 ? "+" : "-";
-  const hh = String(Math.floor(Math.abs(tz) / 60)).padStart(2, "0");
-  const mm = String(Math.abs(tz) % 60).padStart(2, "0");
-  return d.toISOString().replace("Z", `${sign}${hh}:${mm}`);
+  return new Date().toISOString();
 }
 
 async function fetchHtml(url) {
@@ -27,122 +17,96 @@ async function fetchHtml(url) {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
       accept: "text/html",
       "accept-language": "th-TH,th;q=0.9,en;q=0.8",
-      "cache-control": "no-cache",
-      pragma: "no-cache",
     },
   });
-  if (!res.ok) throw new Error(`Fetch failed ${res.status} ${url}`);
-  return await res.text();
+  if (!res.ok) throw new Error(`Fetch failed ${res.status}`);
+  return res.text();
 }
 
-function cleanText(html) {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<\/?[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 14000);
-}
+/**
+ * ดึงตัวเลขจาก HTML ตามรูปหน้าเว็บจริง
+ * ใช้วิธี regex + text scan (ไม่พึ่ง DOM)
+ */
+function extractStats(html) {
+  const clean = html.replace(/\s+/g, " ");
 
-async function callOpenAI({ lotteryName, sourceUrl, fetchedAt, text }) {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("Missing OPENAI_API_KEY");
+  // ===== 2 ตัวล่าง / 3 ตัวบน (จาก card สีเขียว) =====
+  const pickNumbers = (label, size) => {
+    const regex = new RegExp(`${label}[\\s\\S]{0,500}?([0-9]{${size}})`, "g");
+    const out = [];
+    let m;
+    while ((m = regex.exec(clean)) && out.length < 5) {
+      out.push(m[1]);
+    }
+    return out;
+  };
 
-  const prompt = `
-สรุป/คำนวณสถิติจากหน้าเว็บ "คำนวณหวย" ที่แนบให้
+  // ===== ตารางสถิติ 30 งวด =====
+  const extractTable = (digits) => {
+    const regex = new RegExp(
+      `(\\d{${digits}})[^\\d]{1,20}(\\d+)`,
+      "g"
+    );
+    const rows = [];
+    let m;
+    while ((m = regex.exec(clean))) {
+      rows.push({
+        number: m[1].padStart(digits, "0"),
+        count: Number(m[2]),
+      });
+      if (rows.length >= 100) break;
+    }
+    return rows;
+  };
 
-เงื่อนไข:
-- ตอบกลับเป็น JSON เท่านั้น (ห้ามมีข้อความนอก JSON)
-- ใช้ข้อมูลจาก TEXT ที่ให้เท่านั้น ห้ามเดาเพิ่ม
-- สรุป "30 งวดล่าสุด" (ถ้าใน TEXT มีน้อยกว่า 30 ให้ใช้เท่าที่มี)
-
-ให้ output JSON รูปแบบนี้เท่านั้น:
-{
-  "lottery": "thai_government",
-  "lottery_name": "${lotteryName}",
-  "source_url": "${sourceUrl}",
-  "fetched_at": "${fetchedAt}",
-  "window": { "latest_n_draws": 30 },
-  "top2": {
-    "most_common": [{"number":"00","count":0}],
-    "frequency_table": [{"number":"00","count":0}]
-  },
-  "top3": {
-    "most_common": [{"number":"000","count":0}],
-    "frequency_table": [{"number":"000","count":0}]
-  },
-  "notes": ""
-}
-
-TEXT:
-${text}
-`.trim();
-
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
+  return {
+    daily: {
+      top3: pickNumbers("3 ตัวบน", 3),
+      bottom2: pickNumbers("2 ตัวล่าง", 2),
     },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      temperature: 0,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You output ONLY valid JSON. No markdown. No extra text.",
-        },
-        { role: "user", content: prompt },
-      ],
-    }),
-  });
-
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    throw new Error(`OpenAI ${res.status}: ${t}`);
-  }
-
-  const data = await res.json();
-  const content = data.choices?.[0]?.message?.content;
-  if (!content) throw new Error("No content from OpenAI");
-
-  // กันเคสโมเดลเผลอใส่ ```json
-  const cleaned = content
-    .replace(/```json/gi, "")
-    .replace(/```/g, "")
-    .trim();
-
-  return JSON.parse(cleaned);
+    stats_30_draws: {
+      top2: extractTable(2),
+      top3: extractTable(3),
+    },
+  };
 }
 
 /* ================= MAIN ================= */
 
 async function main() {
-  const html = await fetchHtml(TARGET.url);
-  const text = cleanText(html);
+  const html = await fetchHtml(TARGET_URL);
+  const stats = extractStats(html);
 
-  const stats = await callOpenAI({
-    lotteryName: TARGET.name,
-    sourceUrl: TARGET.url,
-    fetchedAt: nowISO(),
-    text,
-  });
-
-  // normalize
-  stats.lottery = "thai_government";
-  stats.lottery_name = TARGET.name;
-  stats.source_url = TARGET.url;
-  stats.fetched_at = stats.fetched_at || nowISO();
-  stats.window = stats.window || { latest_n_draws: 30 };
-  if (!stats.window.latest_n_draws) stats.window.latest_n_draws = 30;
+  const result = {
+    lottery: "thai_government",
+    lottery_name: "หวยรัฐบาลไทย",
+    source_url: TARGET_URL,
+    fetched_at: nowISO(),
+    window: {
+      latest_n_draws: 30,
+    },
+    daily: stats.daily,
+    top2: {
+      frequency_table: stats.stats_30_draws.top2,
+    },
+    top3: {
+      frequency_table: stats.stats_30_draws.top3,
+    },
+    notes:
+      "ข้อมูลดึงตรงจาก exphuay.com ไม่ได้ใช้ OpenAI คำนวณ",
+  };
 
   await fs.mkdir("public", { recursive: true });
-  await fs.writeFile(TARGET.out, JSON.stringify(stats, null, 2), "utf8");
+  await fs.writeFile(
+    "public/gov_thai.json",
+    JSON.stringify(result, null, 2),
+    "utf8"
+  );
+
+  console.log("✅ public/gov_thai.json updated");
 }
 
 main().catch((err) => {
-  console.error(err);
+  console.error("❌ Error:", err.message);
   process.exit(1);
 });
