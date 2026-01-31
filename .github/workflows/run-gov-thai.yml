@@ -18,7 +18,7 @@ jobs:
           cache: "npm"
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
       - name: Run script
         run: node scripts/gov_thai_stats.mjs
