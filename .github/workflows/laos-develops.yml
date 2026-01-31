@@ -1,0 +1,42 @@
+name: Run Laos Develops Stats
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 15 * * 1"   # วันจันทร์ เวลา 22:00 น. ไทย
+    - cron: "0 15 * * 3"   # วันพุธ เวลา 22:00 น. ไทย
+    - cron: "0 15 * * 5"   # วันศุกร์ เวลา 22:00 น. ไทย
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install puppeteer
+
+      - name: Install Chrome for Puppeteer
+        run: npx puppeteer browsers install chrome
+
+      - name: Run script
+        run: node scripts/laos_develops_stats.mjs
+
+      - name: Commit & push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes."
+            exit 0
+          fi
+          git commit -m "chore: update laos develops stats"
+          git push
