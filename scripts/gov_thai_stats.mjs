@@ -7,191 +7,237 @@ function nowISO() {
   return new Date().toISOString();
 }
 
-/**
- * ใช้ Puppeteer เปิดหน้าเว็บและดึงข้อมูลจาก DOM โดยตรง
- */
 async function scrapeData(url) {
   console.log("🌐 Opening browser...");
   const browser = await puppeteer.launch({
     headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+    ],
   });
 
   const page = await browser.newPage();
-  await page.setViewport({ width: 1280, height: 2000 });
+  
+  // ตั้ง User-Agent
+  await page.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  );
+  
+  await page.setViewport({ width: 1920, height: 1080 });
 
   console.log(`📄 Loading ${url}...`);
-  await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+  await page.goto(url, { waitUntil: "networkidle2", timeout: 120000 });
 
-  // รอให้ข้อมูลโหลดเสร็จ
+  // รอ 10 วินาทีให้ JavaScript render เสร็จ
+  console.log("⏳ Waiting 10 seconds for JavaScript to render...");
+  await new Promise((r) => setTimeout(r, 10000));
+
+  // Scroll ทั้งหน้า
+  console.log("📜 Scrolling page...");
+  await page.evaluate(async () => {
+    for (let i = 0; i < 10; i++) {
+      window.scrollBy(0, 500);
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    window.scrollTo(0, 0);
+  });
+
   await new Promise((r) => setTimeout(r, 3000));
 
-  // ดึงข้อมูลจาก DOM
+  // Debug: ดู HTML structure
+  const debugInfo = await page.evaluate(() => {
+    const body = document.body.innerText;
+    const allButtons = Array.from(document.querySelectorAll("button")).map(
+      (b) => b.textContent?.trim()
+    );
+    const allTables = document.querySelectorAll("table").length;
+    const allDivs = document.querySelectorAll("div").length;
+
+    return {
+      bodyTextLength: body.length,
+      bodyTextPreview: body.slice(0, 2000),
+      buttonTexts: allButtons.slice(0, 50),
+      tableCount: allTables,
+      divCount: allDivs,
+    };
+  });
+
+  console.log("🔍 Debug Info:");
+  console.log("Body text length:", debugInfo.bodyTextLength);
+  console.log("Tables:", debugInfo.tableCount);
+  console.log("Buttons:", debugInfo.buttonTexts);
+  console.log("Body preview:", debugInfo.bodyTextPreview.slice(0, 500));
+
+  // ดึงข้อมูลจาก body text โดยใช้ regex
   const data = await page.evaluate(() => {
-    // Helper: ดึงข้อความจาก element
-    const getText = (el) => el?.textContent?.trim() || "";
+    const bodyText = document.body.innerText;
 
-    // Helper: ดึง array ของตัวเลขจาก buttons
-    const getNumbersFromButtons = (container) => {
-      if (!container) return [];
-      const buttons = container.querySelectorAll("button");
-      return Array.from(buttons)
-        .map((btn) => getText(btn))
-        .filter((t) => /^\d+$/.test(t));
+    // ฟังก์ชันดึงตัวเลขจาก text
+    const extractNumbers = (text, digits) => {
+      const regex = new RegExp(`\\b\\d{${digits}}\\b`, "g");
+      const matches = text.match(regex) || [];
+      return [...new Set(matches)].filter(
+        (n) => n !== "0".repeat(digits) && n !== "000" && n !== "00"
+      );
     };
 
-    // Helper: ตรวจสอบว่า button เป็นสีเขียว (recommended)
-    const getRecommendedNumbers = (container) => {
-      if (!container) return [];
-      const buttons = container.querySelectorAll("button");
-      return Array.from(buttons)
-        .filter((btn) => {
-          const classes = btn.className || "";
-          const style = btn.getAttribute("style") || "";
-          return (
-            classes.includes("green") ||
-            classes.includes("bg-green") ||
-            style.includes("green")
-          );
-        })
-        .map((btn) => getText(btn))
-        .filter((t) => /^\d+$/.test(t));
-    };
-
-    // ค้นหา section "คำนวณหวยรัฐบาลไทย ประจำวัน"
-    const allText = document.body.innerText;
-
-    // ดึง 3 ตัวบน - หาจาก heading แล้วดู sibling
+    // หาส่วน "3 ตัวบน" และ "2 ตัวล่าง"
     let top3 = [];
-    let top3Recommended = [];
     let bottom2 = [];
-    let bottom2Recommended = [];
     let runningNumber = "";
     let fullSetNumber = "";
 
-    // หา elements โดยใช้ text content
-    const headings = document.querySelectorAll("h4, h5, h3, div, span");
+    // แยก sections
+    const sections = bodyText.split(/\n+/);
 
-    headings.forEach((el) => {
-      const text = getText(el);
+    let inTop3Section = false;
+    let inBottom2Section = false;
+    let inRunningSection = false;
+    let inFullSetSection = false;
 
-      if (text === "3 ตัวบน") {
-        // หา container ถัดไป
-        let sibling = el.nextElementSibling;
-        while (sibling && !getText(sibling).match(/^\d{3}/)) {
-          sibling = sibling.nextElementSibling;
-        }
-        if (sibling) {
-          const parent = el.parentElement;
-          top3 = getNumbersFromButtons(parent);
-          top3Recommended = getRecommendedNumbers(parent);
-        }
+    for (const line of sections) {
+      const trimmed = line.trim();
+
+      if (trimmed.includes("3 ตัวบน")) {
+        inTop3Section = true;
+        inBottom2Section = false;
+        inRunningSection = false;
+        inFullSetSection = false;
+        continue;
+      }
+      if (trimmed.includes("2 ตัวล่าง")) {
+        inTop3Section = false;
+        inBottom2Section = true;
+        inRunningSection = false;
+        inFullSetSection = false;
+        continue;
+      }
+      if (trimmed === "วิ่ง") {
+        inTop3Section = false;
+        inBottom2Section = false;
+        inRunningSection = true;
+        inFullSetSection = false;
+        continue;
+      }
+      if (trimmed === "รูด") {
+        inTop3Section = false;
+        inBottom2Section = false;
+        inRunningSection = false;
+        inFullSetSection = true;
+        continue;
       }
 
-      if (text === "2 ตัวล่าง") {
-        const parent = el.parentElement;
-        bottom2 = getNumbersFromButtons(parent);
-        bottom2Recommended = getRecommendedNumbers(parent);
+      // ดึงตัวเลขจากแต่ละ section
+      if (inTop3Section) {
+        const nums = extractNumbers(trimmed, 3);
+        top3.push(...nums);
       }
-
-      if (text === "วิ่ง") {
-        const parent = el.parentElement;
-        const nums = getNumbersFromButtons(parent);
-        runningNumber = nums[0] || "";
+      if (inBottom2Section) {
+        const nums = extractNumbers(trimmed, 2);
+        bottom2.push(...nums);
       }
-
-      if (text === "รูด") {
-        const parent = el.parentElement;
-        const nums = getNumbersFromButtons(parent);
-        fullSetNumber = nums[0] || "";
+      if (inRunningSection && /^\d$/.test(trimmed)) {
+        runningNumber = trimmed;
+        inRunningSection = false;
       }
-    });
-
-    // ถ้าวิธีข้างบนไม่ได้ผล ลองหาจาก button ทั้งหมด
-    if (top3.length === 0) {
-      const allButtons = document.querySelectorAll("button");
-      const nums3 = [];
-      const nums2 = [];
-
-      allButtons.forEach((btn) => {
-        const t = getText(btn);
-        if (/^\d{3}$/.test(t) && !nums3.includes(t)) nums3.push(t);
-        if (/^\d{2}$/.test(t) && !nums2.includes(t)) nums2.push(t);
-      });
-
-      top3 = nums3.slice(0, 5);
-      bottom2 = nums2.slice(0, 6);
+      if (inFullSetSection && /^\d$/.test(trimmed)) {
+        fullSetNumber = trimmed;
+        inFullSetSection = false;
+      }
     }
 
-    // ดึงตาราง digit frequency (สถิติจำนวนครั้งที่ออก)
+    // ดึง digit frequency จากตาราง
     const digitFrequency = [];
-    const tables = document.querySelectorAll("table");
-
-    tables.forEach((table) => {
-      const rows = table.querySelectorAll("tr");
-      rows.forEach((row) => {
-        const cells = row.querySelectorAll("td");
-        if (cells.length >= 4) {
-          const digit = getText(cells[0]);
-          if (/^[0-9]$/.test(digit)) {
-            digitFrequency.push({
-              digit,
-              top3_count: parseInt(getText(cells[1])) || 0,
-              bottom2_count: parseInt(getText(cells[2])) || 0,
-              total: parseInt(getText(cells[3])) || 0,
-            });
-          }
+    const freqMatch = bodyText.match(
+      /เลข\s+3 ตัวบน\s+2 ตัวล่าง\s+รวม([\s\S]*?)(?:สถิติ|$)/
+    );
+    if (freqMatch) {
+      const freqText = freqMatch[1];
+      const rows = freqText.trim().split("\n");
+      for (const row of rows) {
+        const parts = row.trim().split(/\s+/);
+        if (parts.length >= 4 && /^[0-9]$/.test(parts[0])) {
+          digitFrequency.push({
+            digit: parts[0],
+            top3_count: parseInt(parts[1]) || 0,
+            bottom2_count: parseInt(parts[2]) || 0,
+            total: parseInt(parts[3]) || 0,
+          });
         }
-      });
-    });
+      }
+    }
 
-    // ดึงตาราง 30 งวดล่าสุด
+    // ดึงสถิติ 30 งวด
     const stats30Bottom2 = [];
     const stats30Top3 = [];
 
-    tables.forEach((table) => {
-      const headerText =
-        table.previousElementSibling?.textContent ||
-        table.closest("div")?.querySelector("h3, h4, h5")?.textContent ||
-        "";
-
-      const rows = table.querySelectorAll("tr");
-      rows.forEach((row) => {
-        const cells = row.querySelectorAll("td");
-        if (cells.length >= 2) {
-          const number = getText(cells[0]);
-          const count = parseInt(getText(cells[1])) || 0;
-
-          if (/^\d{2}$/.test(number)) {
-            stats30Bottom2.push({ number, count });
-          } else if (/^\d{3}$/.test(number)) {
-            stats30Top3.push({ number, count });
-          }
+    // หาตาราง 2 ตัวล่าง
+    const bottom2Match = bodyText.match(
+      /ตารางแสดงผลหวยรัฐบาลไทย 2 ตัวล่าง[\s\S]*?เลขที่ออก\s+จำนวนครั้งที่ออก([\s\S]*?)(?:ตาราง|คำนวณ|$)/
+    );
+    if (bottom2Match) {
+      const rows = bottom2Match[1].trim().split("\n");
+      for (const row of rows) {
+        const parts = row.trim().split(/\s+/);
+        if (parts.length >= 2 && /^\d{2}$/.test(parts[0])) {
+          stats30Bottom2.push({
+            number: parts[0],
+            count: parseInt(parts[1]) || 0,
+          });
         }
-      });
-    });
+      }
+    }
+
+    // หาตาราง 3 ตัวบน
+    const top3Match = bodyText.match(
+      /ตารางแสดงผลหวยรัฐบาลไทย 3 ตัวบน[\s\S]*?เลขที่ออก\s+จำนวนครั้งที่ออก([\s\S]*?)(?:ตาราง|$)/
+    );
+    if (top3Match) {
+      const rows = top3Match[1].trim().split("\n");
+      for (const row of rows) {
+        const parts = row.trim().split(/\s+/);
+        if (parts.length >= 2 && /^\d{3}$/.test(parts[0])) {
+          stats30Top3.push({
+            number: parts[0],
+            count: parseInt(parts[1]) || 0,
+          });
+        }
+      }
+    }
 
     return {
       daily_calculation: {
-        top3,
-        top3_recommended: top3Recommended,
-        bottom2,
-        bottom2_recommended: bottom2Recommended,
+        top3: [...new Set(top3)].slice(0, 10),
+        top3_recommended: [],
+        bottom2: [...new Set(bottom2)].slice(0, 12),
+        bottom2_recommended: [],
         running_number: runningNumber,
         full_set_number: fullSetNumber,
       },
-      digit_frequency: {
-        data: digitFrequency,
-      },
+      digit_frequency: { data: digitFrequency },
       statistics_30_draws: {
         bottom2: stats30Bottom2,
         top3: stats30Top3,
       },
+      _debug: {
+        foundTop3: top3.length,
+        foundBottom2: bottom2.length,
+      },
     };
   });
 
+  // Save screenshot for debug
+  await page.screenshot({ path: "debug-screenshot.png", fullPage: true });
+  console.log("📸 Screenshot saved to debug-screenshot.png");
+
   await browser.close();
   console.log("✅ Data extracted");
+  console.log("Found top3:", data._debug?.foundTop3);
+  console.log("Found bottom2:", data._debug?.foundBottom2);
+
   return data;
 }
 
@@ -222,5 +268,6 @@ async function main() {
 
 main().catch((err) => {
   console.error("❌ Error:", err.message);
+  console.error(err.stack);
   process.exit(1);
 });
