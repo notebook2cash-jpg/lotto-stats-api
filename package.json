@@ -1,0 +1,8 @@
+{
+  "name": "lotto-stats-api",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "puppeteer": "^24.12.1"
+  }
+}
