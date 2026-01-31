@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import puppeteer from "puppeteer";
 
 const TARGET_URL = "https://exphuay.com/calculate/goverment";
 
@@ -6,68 +7,196 @@ function nowISO() {
   return new Date().toISOString();
 }
 
-async function fetchHtml(url) {
-  const res = await fetch(url, {
-    headers: {
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-      accept: "text/html",
-      "accept-language": "th-TH,th;q=0.9,en;q=0.8",
-    },
+/**
+ * ใช้ Puppeteer เปิดหน้าเว็บและดึงข้อมูลจาก DOM โดยตรง
+ */
+async function scrapeData(url) {
+  console.log("🌐 Opening browser...");
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox"],
   });
-  if (!res.ok) throw new Error(`Fetch failed ${res.status} ${url}`);
-  return await res.text();
-}
 
-// NOTE: เป็นตัวอ่านแบบ “ดึงตัวเลข+ตาราง” จาก HTML (ไม่ใช้ OpenAI)
-function extractFromHtml(html) {
-  const clean = html.replace(/\s+/g, " ");
+  const page = await browser.newPage();
+  await page.setViewport({ width: 1280, height: 2000 });
 
-  // พยายามดึงเลขที่แสดงเป็นปุ่ม/กล่องในส่วน "คำนวณประจำวัน"
-  // (ถ้าหน้าเว็บเปลี่ยน layout อาจต้องปรับ regex)
-  const pickNear = (label, digits, limit = 10) => {
-    const re = new RegExp(`${label}[\\s\\S]{0,2000}?`, "i");
-    const m = clean.match(re);
-    if (!m) return [];
-    const seg = m[0];
-    const nums = seg.match(new RegExp(`\\b\\d{${digits}}\\b`, "g")) || [];
-    // unique + keep order
-    const out = [];
-    for (const n of nums) {
-      if (!out.includes(n)) out.push(n);
-      if (out.length >= limit) break;
-    }
-    return out;
-  };
+  console.log(`📄 Loading ${url}...`);
+  await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
 
-  // ตารางความถี่ (เลข, จำนวนครั้งที่ออก) สำหรับ 2 ตัว และ 3 ตัว
-  const tableFreq = (digits, maxRows = 500) => {
-    const re = new RegExp(`\\b(\\d{${digits}})\\b[^\\d]{1,20}(\\d+)`, "g");
-    const rows = [];
-    let m;
-    while ((m = re.exec(clean))) {
-      rows.push({
-        number: m[1].padStart(digits, "0"),
-        count: Number(m[2]),
+  // รอให้ข้อมูลโหลดเสร็จ
+  await new Promise((r) => setTimeout(r, 3000));
+
+  // ดึงข้อมูลจาก DOM
+  const data = await page.evaluate(() => {
+    // Helper: ดึงข้อความจาก element
+    const getText = (el) => el?.textContent?.trim() || "";
+
+    // Helper: ดึง array ของตัวเลขจาก buttons
+    const getNumbersFromButtons = (container) => {
+      if (!container) return [];
+      const buttons = container.querySelectorAll("button");
+      return Array.from(buttons)
+        .map((btn) => getText(btn))
+        .filter((t) => /^\d+$/.test(t));
+    };
+
+    // Helper: ตรวจสอบว่า button เป็นสีเขียว (recommended)
+    const getRecommendedNumbers = (container) => {
+      if (!container) return [];
+      const buttons = container.querySelectorAll("button");
+      return Array.from(buttons)
+        .filter((btn) => {
+          const classes = btn.className || "";
+          const style = btn.getAttribute("style") || "";
+          return (
+            classes.includes("green") ||
+            classes.includes("bg-green") ||
+            style.includes("green")
+          );
+        })
+        .map((btn) => getText(btn))
+        .filter((t) => /^\d+$/.test(t));
+    };
+
+    // ค้นหา section "คำนวณหวยรัฐบาลไทย ประจำวัน"
+    const allText = document.body.innerText;
+
+    // ดึง 3 ตัวบน - หาจาก heading แล้วดู sibling
+    let top3 = [];
+    let top3Recommended = [];
+    let bottom2 = [];
+    let bottom2Recommended = [];
+    let runningNumber = "";
+    let fullSetNumber = "";
+
+    // หา elements โดยใช้ text content
+    const headings = document.querySelectorAll("h4, h5, h3, div, span");
+
+    headings.forEach((el) => {
+      const text = getText(el);
+
+      if (text === "3 ตัวบน") {
+        // หา container ถัดไป
+        let sibling = el.nextElementSibling;
+        while (sibling && !getText(sibling).match(/^\d{3}/)) {
+          sibling = sibling.nextElementSibling;
+        }
+        if (sibling) {
+          const parent = el.parentElement;
+          top3 = getNumbersFromButtons(parent);
+          top3Recommended = getRecommendedNumbers(parent);
+        }
+      }
+
+      if (text === "2 ตัวล่าง") {
+        const parent = el.parentElement;
+        bottom2 = getNumbersFromButtons(parent);
+        bottom2Recommended = getRecommendedNumbers(parent);
+      }
+
+      if (text === "วิ่ง") {
+        const parent = el.parentElement;
+        const nums = getNumbersFromButtons(parent);
+        runningNumber = nums[0] || "";
+      }
+
+      if (text === "รูด") {
+        const parent = el.parentElement;
+        const nums = getNumbersFromButtons(parent);
+        fullSetNumber = nums[0] || "";
+      }
+    });
+
+    // ถ้าวิธีข้างบนไม่ได้ผล ลองหาจาก button ทั้งหมด
+    if (top3.length === 0) {
+      const allButtons = document.querySelectorAll("button");
+      const nums3 = [];
+      const nums2 = [];
+
+      allButtons.forEach((btn) => {
+        const t = getText(btn);
+        if (/^\d{3}$/.test(t) && !nums3.includes(t)) nums3.push(t);
+        if (/^\d{2}$/.test(t) && !nums2.includes(t)) nums2.push(t);
       });
-      if (rows.length >= maxRows) break;
-    }
-    return rows;
-  };
 
-  return {
-    daily: {
-      top3: pickNear("3 ตัวบน", 3, 10),
-      bottom2: pickNear("2 ตัวล่าง", 2, 12),
-    },
-    top2_frequency_table: tableFreq(2),
-    top3_frequency_table: tableFreq(3),
-  };
+      top3 = nums3.slice(0, 5);
+      bottom2 = nums2.slice(0, 6);
+    }
+
+    // ดึงตาราง digit frequency (สถิติจำนวนครั้งที่ออก)
+    const digitFrequency = [];
+    const tables = document.querySelectorAll("table");
+
+    tables.forEach((table) => {
+      const rows = table.querySelectorAll("tr");
+      rows.forEach((row) => {
+        const cells = row.querySelectorAll("td");
+        if (cells.length >= 4) {
+          const digit = getText(cells[0]);
+          if (/^[0-9]$/.test(digit)) {
+            digitFrequency.push({
+              digit,
+              top3_count: parseInt(getText(cells[1])) || 0,
+              bottom2_count: parseInt(getText(cells[2])) || 0,
+              total: parseInt(getText(cells[3])) || 0,
+            });
+          }
+        }
+      });
+    });
+
+    // ดึงตาราง 30 งวดล่าสุด
+    const stats30Bottom2 = [];
+    const stats30Top3 = [];
+
+    tables.forEach((table) => {
+      const headerText =
+        table.previousElementSibling?.textContent ||
+        table.closest("div")?.querySelector("h3, h4, h5")?.textContent ||
+        "";
+
+      const rows = table.querySelectorAll("tr");
+      rows.forEach((row) => {
+        const cells = row.querySelectorAll("td");
+        if (cells.length >= 2) {
+          const number = getText(cells[0]);
+          const count = parseInt(getText(cells[1])) || 0;
+
+          if (/^\d{2}$/.test(number)) {
+            stats30Bottom2.push({ number, count });
+          } else if (/^\d{3}$/.test(number)) {
+            stats30Top3.push({ number, count });
+          }
+        }
+      });
+    });
+
+    return {
+      daily_calculation: {
+        top3,
+        top3_recommended: top3Recommended,
+        bottom2,
+        bottom2_recommended: bottom2Recommended,
+        running_number: runningNumber,
+        full_set_number: fullSetNumber,
+      },
+      digit_frequency: {
+        data: digitFrequency,
+      },
+      statistics_30_draws: {
+        bottom2: stats30Bottom2,
+        top3: stats30Top3,
+      },
+    };
+  });
+
+  await browser.close();
+  console.log("✅ Data extracted");
+  return data;
 }
 
 async function main() {
-  const html = await fetchHtml(TARGET_URL);
-  const parsed = extractFromHtml(html);
+  const parsed = await scrapeData(TARGET_URL);
 
   const result = {
     lottery: "thai_government",
@@ -75,15 +204,20 @@ async function main() {
     source_url: TARGET_URL,
     fetched_at: nowISO(),
     window: { latest_n_draws: 30 },
-    daily: parsed.daily,
-    top2: { frequency_table: parsed.top2_frequency_table },
-    top3: { frequency_table: parsed.top3_frequency_table },
-    notes: "ดึงข้อมูลจากหน้าเว็บ exphuay โดยตรง ไม่ใช้ OpenAI",
+    daily_calculation: parsed.daily_calculation,
+    digit_frequency: parsed.digit_frequency,
+    statistics_30_draws: parsed.statistics_30_draws,
+    notes: "ดึงข้อมูลจากหน้าเว็บ exphuay โดยตรง (ไม่ใช้ OpenAI)",
   };
 
   await fs.mkdir("public", { recursive: true });
-  await fs.writeFile("public/gov_thai.json", JSON.stringify(result, null, 2), "utf8");
+  await fs.writeFile(
+    "public/gov_thai.json",
+    JSON.stringify(result, null, 2),
+    "utf8"
+  );
   console.log("✅ public/gov_thai.json updated");
+  console.log(JSON.stringify(result, null, 2));
 }
 
 main().catch((err) => {
