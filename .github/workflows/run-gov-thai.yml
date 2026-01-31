@@ -1,10 +1,7 @@
-name: Run Gov Thai Stats
+name: Run Gov Thai Stats (manual)
 
 on:
   workflow_dispatch: {}
-  schedule:
-    # วันที่ 2 และ 17 ของทุกเดือน เวลา 09:00 ไทย (02:00 UTC)
-    - cron: "0 2 2,17 * *"
 
 permissions:
   contents: write
@@ -18,6 +15,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
 
       - name: Run script
         run: node scripts/gov_thai_stats.mjs
