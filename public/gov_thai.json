@@ -2,17 +2,17 @@
   "lottery": "thai_government",
   "lottery_name": "หวยรัฐบาลไทย",
   "source_url": "https://exphuay.com/calculate/goverment",
-  "fetched_at": "2026-01-31T02:03:18.798Z",
+  "fetched_at": "2026-02-02T15:54:25.625Z",
   "window": {
     "latest_n_draws": 30
   },
   "daily_calculation": {
     "top3": [
-      "849",
-      "378",
-      "257",
-      "657",
-      "278",
+      "879",
+      "358",
+      "247",
+      "747",
+      "258",
       "145",
       "209",
       "221",
@@ -22,20 +22,20 @@
     "top3_recommended": [],
     "bottom2": [
       "56",
-      "32",
-      "27",
-      "80",
+      "37",
+      "22",
+      "88",
       "36",
       "12",
       "16",
       "20",
       "21",
-      "22",
       "23",
-      "26"
+      "26",
+      "31"
     ],
     "bottom2_recommended": [],
-    "running_number": "2",
+    "running_number": "7",
     "full_set_number": "3"
   },
   "digit_frequency": {
@@ -73,7 +73,7 @@
       },
       {
         "number": "32",
-        "count": 2
+        "count": 1
       },
       {
         "number": "36",
@@ -85,6 +85,10 @@
       },
       {
         "number": "38",
+        "count": 1
+      },
+      {
+        "number": "48",
         "count": 1
       },
       {
@@ -198,6 +202,10 @@
         "count": 1
       },
       {
+        "number": "629",
+        "count": 1
+      },
+      {
         "number": "646",
         "count": 1
       },
@@ -255,10 +263,6 @@
       },
       {
         "number": "978",
-        "count": 1
-      },
-      {
-        "number": "044",
         "count": 1
       }
     ]
