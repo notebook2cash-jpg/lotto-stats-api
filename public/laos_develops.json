@@ -2,41 +2,41 @@
   "lottery": "laos_develops",
   "lottery_name": "หวยลาวพัฒนา",
   "source_url": "https://exphuay.com/calculate/laosdevelops",
-  "fetched_at": "2026-02-02T16:05:30.230Z",
+  "fetched_at": "2026-02-04T17:34:32.707Z",
   "window": {
     "latest_n_draws": 30
   },
   "daily_calculation": {
     "top3": [
-      "663",
-      "132",
-      "001",
-      "801",
-      "032",
+      "682",
+      "063",
+      "901",
+      "701",
+      "963",
       "105",
-      "133",
       "145",
       "182",
-      "369"
+      "369",
+      "401"
     ],
     "top3_recommended": [],
     "bottom2": [
-      "41",
-      "30",
+      "40",
       "79",
-      "08",
-      "31",
-      "67",
+      "38",
+      "07",
+      "70",
+      "63",
       "16",
-      "21",
       "26",
+      "30",
       "34",
       "36",
       "37"
     ],
     "bottom2_recommended": [],
-    "running_number": "0",
-    "full_set_number": "7"
+    "running_number": "9",
+    "full_set_number": "9"
   },
   "digit_frequency": {
     "data": []
@@ -45,10 +45,6 @@
     "bottom2": [
       {
         "number": "16",
-        "count": 1
-      },
-      {
-        "number": "21",
         "count": 1
       },
       {
@@ -109,7 +105,7 @@
       },
       {
         "number": "70",
-        "count": 1
+        "count": 2
       },
       {
         "number": "76",
@@ -155,10 +151,6 @@
     "top3": [
       {
         "number": "105",
-        "count": 1
-      },
-      {
-        "number": "133",
         "count": 1
       },
       {
@@ -251,6 +243,10 @@
       },
       {
         "number": "963",
+        "count": 1
+      },
+      {
+        "number": "085",
         "count": 1
       },
       {
