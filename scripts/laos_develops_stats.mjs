@@ -1,10 +1,7 @@
 import fs from "node:fs/promises";
-import puppeteer from "puppeteer-extra";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
+import puppeteer from "puppeteer";
 
-// เปิด stealth mode เพื่อผ่าน Cloudflare bot detection
-puppeteer.use(StealthPlugin());
-
+const CALCULATE_URL = "https://exphuay.com/calculate/laosdevelops";
 const RESULT_URL = "https://exphuay.com/result/laosdevelops";
 const BACKWARD_URL = "https://exphuay.com/backward/laosdevelops";
 
@@ -13,43 +10,19 @@ function nowISO() {
 }
 
 /**
- * รอให้ Cloudflare challenge ผ่าน (title เปลี่ยนจาก "รอสักครู่...")
+ * ใช้ Puppeteer โหลดหน้า /calculate/ ก่อน (ผ่าน Cloudflare ได้)
+ * แล้วใช้ fetch() ภายใน browser context ดึง HTML จากหน้า /result/
+ * (fetch ภายใน browser จะมี Cloudflare cookies ติดไปอัตโนมัติ)
  */
-async function waitForCloudflare(page, timeout = 30000) {
-  const start = Date.now();
-  while (Date.now() - start < timeout) {
-    const title = await page.title();
-    // Cloudflare challenge page มี title "รอสักครู่..." หรือ "Just a moment..."
-    if (
-      !title.includes("รอสักครู่") &&
-      !title.includes("Just a moment") &&
-      !title.includes("Checking") &&
-      title.length > 0
-    ) {
-      console.log(`✅ Cloudflare passed! Title: "${title}"`);
-      return true;
-    }
-    console.log(`⏳ Waiting for Cloudflare... (title: "${title}")`);
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-  const finalTitle = await page.title();
-  console.log(`⚠️  Cloudflare timeout. Final title: "${finalTitle}"`);
-  return false;
-}
-
-/**
- * เปิด browser + stealth mode + ผ่าน Cloudflare
- */
-async function createBrowser() {
-  console.log("🌐 Opening stealth browser...");
+async function fetchHTMLViaBrowser(targetUrl) {
+  console.log("🌐 Opening browser...");
   const browser = await puppeteer.launch({
-    headless: "new",
+    headless: true,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--disable-gpu",
-      "--window-size=1920,1080",
     ],
   });
 
@@ -59,43 +32,99 @@ async function createBrowser() {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
   );
   await page.setViewport({ width: 1920, height: 1080 });
-  await page.setExtraHTTPHeaders({
-    "Accept-Language": "th,en-US;q=0.9,en;q=0.8",
-  });
 
-  return { browser, page };
+  // Step 1: โหลดหน้า /calculate/ ก่อน (หน้านี้ผ่าน Cloudflare ได้)
+  console.log(`🔥 Step 1: Loading ${CALCULATE_URL} (Cloudflare warmup)...`);
+  await page.goto(CALCULATE_URL, {
+    waitUntil: "networkidle2",
+    timeout: 120000,
+  });
+  await new Promise((r) => setTimeout(r, 5000));
+
+  const calcTitle = await page.title();
+  console.log(`✅ Calculate page loaded. Title: "${calcTitle}"`);
+
+  // Step 2: ใช้ fetch() ภายใน browser context (มี cookies ติดไปด้วย)
+  console.log(`📄 Step 2: Fetching ${targetUrl} from browser context...`);
+  const html = await page.evaluate(async (url) => {
+    try {
+      const res = await fetch(url, {
+        credentials: "include",
+        headers: {
+          Accept: "text/html",
+        },
+      });
+      if (!res.ok) {
+        return { error: `HTTP ${res.status}`, html: "" };
+      }
+      const text = await res.text();
+      return { error: null, html: text };
+    } catch (e) {
+      return { error: e.message, html: "" };
+    }
+  }, targetUrl);
+
+  await browser.close();
+
+  if (html.error) {
+    console.log(`⚠️  Fetch error: ${html.error}`);
+    return "";
+  }
+
+  console.log(`✅ Got HTML (${html.html.length} bytes)`);
+  return html.html;
 }
 
 /**
- * โหลดหน้าเว็บ + รอ Cloudflare ผ่าน + ดึงข้อมูล
+ * Fallback: ใช้ Puppeteer navigate ไปหน้า target โดยตรง
  */
-async function scrapePageData(page, url) {
-  console.log(`\n📄 Loading ${url}...`);
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+async function fetchHTMLViaNavigation(targetUrl) {
+  console.log(`\n🌐 Fallback: Direct navigation to ${targetUrl}...`);
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+    ],
+  });
 
-  // รอให้ Cloudflare challenge ผ่าน
-  const passed = await waitForCloudflare(page, 30000);
-  if (!passed) {
-    console.log("❌ Cloudflare challenge did not resolve");
-    return [];
+  const page = await browser.newPage();
+  await page.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+  );
+
+  // โหลดหน้า calculate ก่อน
+  await page.goto(CALCULATE_URL, {
+    waitUntil: "networkidle2",
+    timeout: 120000,
+  });
+  await new Promise((r) => setTimeout(r, 5000));
+
+  // Navigate ไปหน้า target (ภายใน session เดียวกัน)
+  await page.goto(targetUrl, { waitUntil: "networkidle2", timeout: 120000 });
+
+  // รอ Cloudflare (ถ้ามี)
+  for (let i = 0; i < 15; i++) {
+    const title = await page.title();
+    if (
+      !title.includes("รอสักครู่") &&
+      !title.includes("Just a moment") &&
+      title.length > 5
+    ) {
+      console.log(`✅ Page loaded. Title: "${title}"`);
+      break;
+    }
+    console.log(`⏳ Waiting for Cloudflare... (${i + 1}/15)`);
+    await new Promise((r) => setTimeout(r, 2000));
   }
 
-  // รอให้ content render เสร็จ
   await new Promise((r) => setTimeout(r, 3000));
 
-  // Scroll เพื่อ trigger lazy loading
-  await page.evaluate(async () => {
-    for (let i = 0; i < 5; i++) {
-      window.scrollBy(0, 500);
-      await new Promise((r) => setTimeout(r, 300));
-    }
-    window.scrollTo(0, 0);
-  });
-  await new Promise((r) => setTimeout(r, 2000));
-
-  // ดึงข้อมูลจาก DOM
-  const data = await page.evaluate(() => {
-    const draws = [];
+  // ดึงข้อมูลจาก DOM โดยตรง
+  const draws = await page.evaluate(() => {
+    const results = [];
     const listItems = document.querySelectorAll("li");
 
     for (const li of listItems) {
@@ -109,66 +138,48 @@ async function scrapePageData(page, url) {
       const numbers = [];
       for (const span of spans) {
         const text = span.textContent.trim();
-        if (/^\d{2,3}$/.test(text)) {
-          numbers.push(text);
-        }
+        if (/^\d{2,3}$/.test(text)) numbers.push(text);
       }
 
       const top3 = numbers.find((n) => n.length === 3);
       const bottom2 = numbers.find((n) => n.length === 2);
-
       if (top3 && bottom2) {
-        draws.push({ date: dateMatch[1], top3, bottom2 });
+        results.push({ date: dateMatch[1], top3, bottom2 });
       }
     }
 
-    return {
-      draws,
-      debug: {
-        title: document.title,
-        bodyLength: document.body.innerText.length,
-        dateLinksCount: document.querySelectorAll(
-          'a[href*="laosdevelops?date="]'
-        ).length,
-      },
-    };
+    return results;
   });
 
-  console.log(`🔍 Debug: title="${data.debug.title}"`);
-  console.log(`🔍 Debug: body length=${data.debug.bodyLength}`);
-  console.log(`🔍 Debug: date links=${data.debug.dateLinksCount}`);
-  console.log(`✅ Found ${data.draws.length} draws from DOM`);
+  await browser.close();
+  return draws;
+}
 
-  // Fallback: parse จาก HTML source
-  if (data.draws.length === 0) {
-    console.log("🔄 Trying HTML source parsing...");
-    const html = await page.content();
+/**
+ * Parse ข้อมูลผลหวย 30 งวดจาก HTML
+ */
+function parseDrawResults(html) {
+  const draws = [];
 
-    // Pattern: SvelteKit SSR
-    const regex =
-      /href="\/result\/laosdevelops\?date=(\d{4}-\d{2}-\d{2})"[\s\S]*?<!--\[-->(\d{3})<!--\]-->[\s\S]*?<!--\[-->(\d{2})<!--\]-->/g;
-    let match;
-    while ((match = regex.exec(html)) !== null) {
-      data.draws.push({ date: match[1], top3: match[2], bottom2: match[3] });
-    }
-
-    if (data.draws.length === 0) {
-      // Pattern: hydrated
-      const regex2 =
-        /href="\/result\/laosdevelops\?date=(\d{4}-\d{2}-\d{2})"[\s\S]*?font-bold[^>]*>\s*(\d{3})\s*<\/span>[\s\S]*?font-bold[^>]*>\s*(\d{2})\s*<\/span>/g;
-      while ((match = regex2.exec(html)) !== null) {
-        data.draws.push({
-          date: match[1],
-          top3: match[2],
-          bottom2: match[3],
-        });
-      }
-    }
-
-    console.log(`✅ Found ${data.draws.length} draws from HTML source`);
+  // Pattern 1: SvelteKit SSR (มี <!--[-->XXX<!--]-->)
+  const regex1 =
+    /href="\/result\/laosdevelops\?date=(\d{4}-\d{2}-\d{2})"[\s\S]*?<!--\[-->(\d{3})<!--\]-->[\s\S]*?<!--\[-->(\d{2})<!--\]-->/g;
+  let match;
+  while ((match = regex1.exec(html)) !== null) {
+    draws.push({ date: match[1], top3: match[2], bottom2: match[3] });
   }
 
-  return data.draws;
+  // Pattern 2: hydrated DOM (ไม่มี comment markers)
+  if (draws.length === 0) {
+    const regex2 =
+      /href="\/result\/laosdevelops\?date=(\d{4}-\d{2}-\d{2})"[\s\S]*?font-bold[^>]*>\s*(\d{3})\s*<\/span>[\s\S]*?font-bold[^>]*>\s*(\d{2})\s*<\/span>/g;
+    while ((match = regex2.exec(html)) !== null) {
+      draws.push({ date: match[1], top3: match[2], bottom2: match[3] });
+    }
+  }
+
+  console.log(`✅ Parsed ${draws.length} draws from HTML`);
+  return draws;
 }
 
 // ===== สถิติ / คำนวณ =====
@@ -258,24 +269,44 @@ function computeDailyCalculation(draws, digitFrequency) {
 async function main() {
   console.log("🚀 Starting scrape...\n");
 
-  const { browser, page } = await createBrowser();
   let draws = [];
 
-  try {
-    draws = await scrapePageData(page, RESULT_URL);
+  // วิธี 1: โหลด /calculate/ ก่อน แล้ว fetch /result/ จากภายใน browser
+  console.log("=== Strategy 1: Browser-context fetch ===");
+  const resultHtml = await fetchHTMLViaBrowser(RESULT_URL);
 
-    if (draws.length === 0) {
-      console.log("\n⚠️  No draws from result, trying backward page...");
-      draws = await scrapePageData(page, BACKWARD_URL);
+  if (resultHtml) {
+    draws = parseDrawResults(resultHtml);
+  }
+
+  // วิธี 1 fallback: ลอง backward
+  if (draws.length === 0 && resultHtml !== "") {
+    console.log("\n🔄 Trying backward page...");
+    const backwardHtml = await fetchHTMLViaBrowser(BACKWARD_URL);
+    if (backwardHtml) {
+      draws = parseDrawResults(backwardHtml);
     }
-  } finally {
-    await browser.close();
+  }
+
+  // วิธี 2: navigate ตรงไปหน้า result (ผ่าน session calculate)
+  if (draws.length === 0) {
+    console.log("\n=== Strategy 2: Direct navigation with session ===");
+    draws = await fetchHTMLViaNavigation(RESULT_URL);
+    console.log(`✅ Found ${draws.length} draws via navigation`);
+  }
+
+  // วิธี 2 fallback: ลอง backward
+  if (draws.length === 0) {
+    console.log("\n🔄 Trying backward via navigation...");
+    draws = await fetchHTMLViaNavigation(BACKWARD_URL);
+    console.log(`✅ Found ${draws.length} draws via navigation (backward)`);
   }
 
   if (draws.length === 0) {
-    throw new Error("ไม่พบข้อมูลผลหวยจากทั้งสองหน้า");
+    throw new Error("ไม่พบข้อมูลผลหวยจากทุกวิธี");
   }
 
+  // เรียงลำดับจากเก่าไปใหม่
   draws.sort((a, b) => a.date.localeCompare(b.date));
 
   console.log("\n📊 5 งวดล่าสุด:");
@@ -298,7 +329,7 @@ async function main() {
     daily_calculation: dailyCalc,
     digit_frequency: { data: digitFrequency },
     statistics_30_draws: stats30,
-    notes: "ดึงข้อมูลจาก /result/laosdevelops ผ่าน Puppeteer Stealth แล้วคำนวณสถิติเอง",
+    notes: "ดึงข้อมูลจาก /result/laosdevelops แล้วคำนวณสถิติเอง",
   };
 
   await fs.mkdir("public", { recursive: true });
