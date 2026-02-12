@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import puppeteer from "puppeteer";
 
 const RESULT_URL = "https://exphuay.com/result/laosdevelops";
 const BACKWARD_URL = "https://exphuay.com/backward/laosdevelops";
@@ -8,28 +9,49 @@ function nowISO() {
 }
 
 /**
- * ดึง HTML จาก URL ด้วย fetch ธรรมดา (ไม่ต้องใช้ Puppeteer)
- * เพราะหน้า /result และ /backward เป็น server-side rendered
+ * ดึง HTML จาก URL ผ่าน Puppeteer (หลีกเลี่ยง 403 จาก GitHub Actions)
  */
-async function fetchHTML(url) {
-  console.log(`📄 Fetching ${url}...`);
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      Accept:
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-      "Accept-Language": "th,en-US;q=0.7,en;q=0.3",
-    },
+async function fetchHTMLViaPuppeteer(url) {
+  console.log("🌐 Opening browser...");
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+    ],
   });
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} for ${url}`);
-  }
-  return res.text();
+
+  const page = await browser.newPage();
+
+  await page.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  );
+  await page.setViewport({ width: 1920, height: 1080 });
+
+  console.log(`📄 Loading ${url}...`);
+  await page.goto(url, { waitUntil: "networkidle2", timeout: 120000 });
+
+  // รอให้ SvelteKit hydrate เสร็จ
+  console.log("⏳ Waiting for page to fully render...");
+  await new Promise((r) => setTimeout(r, 5000));
+
+  // ดึง HTML ทั้งหมด
+  const html = await page.content();
+
+  // Debug: แสดงจำนวน li ที่พบ
+  const liCount = await page.evaluate(() => {
+    return document.querySelectorAll("li.grid").length;
+  });
+  console.log(`🔍 Found ${liCount} grid list items`);
+
+  await browser.close();
+  return html;
 }
 
 /**
- * Parse ข้อมูลผลหวย 30 งวดจาก HTML ของหน้า /result/laosdevelops
+ * Parse ข้อมูลผลหวย 30 งวดจาก HTML
  *
  * โครงสร้าง HTML จริง (SvelteKit):
  *   <li ...>
@@ -41,18 +63,34 @@ async function fetchHTML(url) {
 function parseDrawResults(html) {
   const draws = [];
 
-  // Pattern ที่ match กับ SvelteKit HTML จริง:
-  // href="/result/laosdevelops?date=YYYY-MM-DD" ... <!--[-->XXX<!--]--> ... <!--[-->YY<!--]-->
-  const regex =
+  // Pattern 1: SvelteKit SSR with comment markers
+  // <!--[-->XXX<!--]--> ภายใน span
+  const regex1 =
     /href="\/result\/laosdevelops\?date=(\d{4}-\d{2}-\d{2})"[\s\S]*?<!--\[-->(\d{3})<!--\]-->[\s\S]*?<!--\[-->(\d{2})<!--\]-->/g;
 
   let match;
-  while ((match = regex.exec(html)) !== null) {
+  while ((match = regex1.exec(html)) !== null) {
     draws.push({
       date: match[1],
       top3: match[2],
       bottom2: match[3],
     });
+  }
+
+  // Pattern 2: หลัง hydrate แล้ว comment อาจหายไป
+  // เป็น <span ...>XXX</span> <span ...>YY</span>
+  if (draws.length === 0) {
+    console.log("🔄 Trying alternative pattern (hydrated DOM)...");
+    const regex2 =
+      /href="\/result\/laosdevelops\?date=(\d{4}-\d{2}-\d{2})"[\s\S]*?font-bold[^>]*>(\d{3})<\/span>[\s\S]*?font-bold[^>]*>(\d{2})<\/span>/g;
+
+    while ((match = regex2.exec(html)) !== null) {
+      draws.push({
+        date: match[1],
+        top3: match[2],
+        bottom2: match[3],
+      });
+    }
   }
 
   console.log(`✅ Found ${draws.length} draws`);
@@ -61,7 +99,6 @@ function parseDrawResults(html) {
 
 /**
  * คำนวณ digit frequency จากผลหวย 30 งวด
- * นับว่าตัวเลข 0-9 ปรากฏกี่ครั้งใน 3 ตัวบน, 2 ตัวล่าง, และรวม
  */
 function computeDigitFrequency(draws) {
   const freq = {};
@@ -70,19 +107,14 @@ function computeDigitFrequency(draws) {
   }
 
   for (const draw of draws) {
-    // นับจาก 3 ตัวบน
     for (const ch of draw.top3) {
-      const d = parseInt(ch);
-      freq[d].top3_count++;
+      freq[parseInt(ch)].top3_count++;
     }
-    // นับจาก 2 ตัวล่าง
     for (const ch of draw.bottom2) {
-      const d = parseInt(ch);
-      freq[d].bottom2_count++;
+      freq[parseInt(ch)].bottom2_count++;
     }
   }
 
-  // คำนวณรวม
   for (let d = 0; d <= 9; d++) {
     freq[d].total = freq[d].top3_count + freq[d].bottom2_count;
   }
@@ -91,10 +123,9 @@ function computeDigitFrequency(draws) {
 }
 
 /**
- * คำนวณสถิติ 30 งวด: เลขที่ออกบ่อยสุด (3 ตัวบน และ 2 ตัวล่าง)
+ * คำนวณสถิติ 30 งวด: เลขที่ออกบ่อยสุด
  */
 function computeStats30(draws) {
-  // นับ 2 ตัวล่างที่ออกซ้ำ
   const bottom2Count = {};
   for (const draw of draws) {
     bottom2Count[draw.bottom2] = (bottom2Count[draw.bottom2] || 0) + 1;
@@ -104,7 +135,6 @@ function computeStats30(draws) {
     .filter((s) => s.count > 1)
     .sort((a, b) => b.count - a.count);
 
-  // นับ 3 ตัวบนที่ออกซ้ำ
   const top3Count = {};
   for (const draw of draws) {
     top3Count[draw.top3] = (top3Count[draw.top3] || 0) + 1;
@@ -119,36 +149,25 @@ function computeStats30(draws) {
 
 /**
  * คำนวณเลขเด่น (daily calculation) จากสถิติ 30 งวด
- * - 3 ตัวบน: เลขที่ออกบ่อย + เลขจากหลักที่ออกบ่อย
- * - 2 ตัวล่าง: เลขที่ออกบ่อย + เลขจากหลักที่ออกบ่อย
- * - วิ่ง: ตัวเลข (0-9) ที่ออกบ่อยสุด
- * - รูด: ตัวเลข (0-9) ที่ออกบ่อยรองลงมา
  */
 function computeDailyCalculation(draws, digitFrequency) {
-  // หา top digit (ตัวเลขที่ปรากฏบ่อยสุด)
   const sortedDigits = [...digitFrequency].sort((a, b) => b.total - a.total);
   const runningNumber = sortedDigits[0]?.digit || "";
   const fullSetNumber = sortedDigits[1]?.digit || "";
 
-  // หาเลข 3 ตัวบนที่น่าสนใจ
-  // วิธี: เอาตัวเลข (digit) ที่ออกบ่อยสุด 3 ตัวมาสร้างชุดเลข
   const topDigits = sortedDigits.slice(0, 5).map((d) => d.digit);
 
-  // สร้างชุด 3 ตัวบนจากตัวเลขเด่น
+  // 3 ตัวบน: เลขที่ออกซ้ำ + permutation จากตัวเลขเด่น
   const top3Set = new Set();
-
-  // เพิ่มเลข 3 ตัวบนที่ออกซ้ำในช่วง 30 งวด
   const top3Freq = {};
   for (const draw of draws) {
     top3Freq[draw.top3] = (top3Freq[draw.top3] || 0) + 1;
   }
-  const repeatedTop3 = Object.entries(top3Freq)
+  Object.entries(top3Freq)
     .filter(([, c]) => c > 1)
     .sort((a, b) => b[1] - a[1])
-    .map(([n]) => n);
-  for (const n of repeatedTop3) top3Set.add(n);
+    .forEach(([n]) => top3Set.add(n));
 
-  // สร้างเลข 3 ตัวจากตัวเลขเด่น (permutation)
   for (let i = 0; i < topDigits.length && top3Set.size < 10; i++) {
     for (let j = 0; j < topDigits.length && top3Set.size < 10; j++) {
       for (let k = 0; k < topDigits.length && top3Set.size < 10; k++) {
@@ -158,21 +177,17 @@ function computeDailyCalculation(draws, digitFrequency) {
     }
   }
 
-  // สร้างชุด 2 ตัวล่างจากตัวเลขเด่น
+  // 2 ตัวล่าง: เลขที่ออกซ้ำ + permutation จากตัวเลขเด่น
   const bottom2Set = new Set();
-
-  // เพิ่มเลข 2 ตัวล่างที่ออกซ้ำ
   const bottom2Freq = {};
   for (const draw of draws) {
     bottom2Freq[draw.bottom2] = (bottom2Freq[draw.bottom2] || 0) + 1;
   }
-  const repeatedBottom2 = Object.entries(bottom2Freq)
+  Object.entries(bottom2Freq)
     .filter(([, c]) => c > 1)
     .sort((a, b) => b[1] - a[1])
-    .map(([n]) => n);
-  for (const n of repeatedBottom2) bottom2Set.add(n);
+    .forEach(([n]) => bottom2Set.add(n));
 
-  // สร้างเลข 2 ตัวจากตัวเลขเด่น
   for (let i = 0; i < topDigits.length && bottom2Set.size < 12; i++) {
     for (let j = 0; j < topDigits.length && bottom2Set.size < 12; j++) {
       const num = topDigits[i] + topDigits[j];
@@ -180,44 +195,41 @@ function computeDailyCalculation(draws, digitFrequency) {
     }
   }
 
-  // เลขจาก 5 งวดล่าสุด (recommended)
+  // เลขจาก 5 งวดล่าสุด
   const recent5 = draws.slice(-5);
-  const top3Recommended = recent5.map((d) => d.top3);
-  const bottom2Recommended = recent5.map((d) => d.bottom2);
 
   return {
     top3: [...top3Set].slice(0, 10),
-    top3_recommended: top3Recommended,
+    top3_recommended: recent5.map((d) => d.top3),
     bottom2: [...bottom2Set].slice(0, 12),
-    bottom2_recommended: bottom2Recommended,
+    bottom2_recommended: recent5.map((d) => d.bottom2),
     running_number: runningNumber,
     full_set_number: fullSetNumber,
   };
 }
 
 async function main() {
-  console.log("🚀 Starting scrape (no Puppeteer needed!)...\n");
+  console.log("🚀 Starting scrape...\n");
 
-  // ดึง HTML จากหน้า result
-  const html = await fetchHTML(RESULT_URL);
-
-  // Parse ผลหวย 30 งวด
+  // ดึง HTML ผ่าน Puppeteer (หลีกเลี่ยง 403)
+  let html = await fetchHTMLViaPuppeteer(RESULT_URL);
   let draws = parseDrawResults(html);
 
+  // Fallback: ลองหน้า backward
   if (draws.length === 0) {
-    // ลองจากหน้า backward เป็น fallback
-    console.log("⚠️  No draws found from result page, trying backward page...");
-    const backwardHtml = await fetchHTML(BACKWARD_URL);
-    draws = parseDrawResults(backwardHtml);
-    if (draws.length === 0) {
-      throw new Error("ไม่พบข้อมูลผลหวยจากทั้งสองหน้า");
-    }
+    console.log("⚠️  No draws from result page, trying backward page...");
+    html = await fetchHTMLViaPuppeteer(BACKWARD_URL);
+    draws = parseDrawResults(html);
   }
 
-  // เรียงลำดับจากเก่าไปใหม่ (จาก HTML มาเป็นใหม่ไปเก่า)
+  if (draws.length === 0) {
+    throw new Error("ไม่พบข้อมูลผลหวยจากทั้งสองหน้า");
+  }
+
+  // เรียงลำดับจากเก่าไปใหม่
   draws.sort((a, b) => a.date.localeCompare(b.date));
 
-  console.log("\n📊 Sample draws:");
+  console.log("\n📊 Sample draws (5 งวดล่าสุด):");
   for (const d of draws.slice(-5)) {
     console.log(`  ${d.date}: 3 ตัวบน=${d.top3}, 2 ตัวล่าง=${d.bottom2}`);
   }
@@ -239,7 +251,7 @@ async function main() {
     digit_frequency: { data: digitFrequency },
     statistics_30_draws: stats30,
     notes:
-      "ดึงข้อมูลจากหน้า /result/laosdevelops (server-rendered) แล้วคำนวณสถิติเอง ไม่ต้องใช้ Puppeteer",
+      "ดึงข้อมูลจากหน้า /result/laosdevelops ผ่าน Puppeteer แล้วคำนวณสถิติเอง",
   };
 
   await fs.mkdir("public", { recursive: true });
