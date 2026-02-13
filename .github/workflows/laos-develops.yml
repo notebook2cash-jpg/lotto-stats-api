@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: write
+  models: read
 
 jobs:
   run:
@@ -20,13 +21,9 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install dependencies
-        run: npm install puppeteer
-
-      - name: Install Chrome for Puppeteer
-        run: npx puppeteer browsers install chrome
-
       - name: Run script
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/laos_develops_stats.mjs
 
       - name: Commit & push if changed
