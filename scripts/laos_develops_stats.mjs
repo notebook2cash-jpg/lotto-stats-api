@@ -1,335 +1,264 @@
 import fs from "node:fs/promises";
-import puppeteer from "puppeteer";
+import path from "node:path";
 
-const CALCULATE_URL = "https://exphuay.com/calculate/laosdevelops";
-const RESULT_URL = "https://exphuay.com/result/laosdevelops";
-const BACKWARD_URL = "https://exphuay.com/backward/laosdevelops";
+// ===== Config =====
+// GitHub Models: ใช้ GITHUB_TOKEN (ฟรี, ไม่ต้อง key เพิ่ม)
+// Gemini: ใช้ GEMINI_API_KEY (ฟรี, ต้องสมัคร)
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
+const GITHUB_MODELS_URL = "https://models.github.ai/inference/chat/completions";
+const GEMINI_URL = GEMINI_API_KEY
+  ? `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`
+  : null;
+
+const SCRIPT_DIR = path.dirname(new URL(import.meta.url).pathname);
+const CALC_IMG = path.join(SCRIPT_DIR, "calc.png");
+const STAT_IMG = path.join(SCRIPT_DIR, "stat.png");
 
 function nowISO() {
   return new Date().toISOString();
 }
 
-/**
- * ใช้ Puppeteer โหลดหน้า /calculate/ ก่อน (ผ่าน Cloudflare ได้)
- * แล้วใช้ fetch() ภายใน browser context ดึง HTML จากหน้า /result/
- * (fetch ภายใน browser จะมี Cloudflare cookies ติดไปอัตโนมัติ)
- */
-async function fetchHTMLViaBrowser(targetUrl) {
-  console.log("🌐 Opening browser...");
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
+// ===== Prompts =====
+
+const CALC_PROMPT = `Read this Thai lottery calculation image (หวยลาวพัฒนา). Return JSON ONLY:
+{
+  "top3": ["043", "682", "430", "830", "482"],
+  "top3_recommended": ["043", "430", "830"],
+  "bottom2": ["76", "44", "39", "08", "46", "03"],
+  "bottom2_recommended": ["44", "46"],
+  "running_number": "4",
+  "full_set_number": "3"
+}
+Rules:
+- "top3": ALL 3-digit numbers under "3 ตัวบน" section (left to right)
+- "top3_recommended": ONLY those with GREEN background
+- "bottom2": ALL 2-digit numbers under "2 ตัวล่าง" section (left to right)
+- "bottom2_recommended": ONLY those with GREEN background
+- "running_number": number under "วิ่ง"
+- "full_set_number": number under "รูด"
+- All values MUST be strings
+- Read EVERY number visible in the image`;
+
+const STAT_PROMPT = `Read this Thai lottery statistics table (สถิติหวยลาวพัฒนา 30 งวด). Return JSON ONLY:
+{
+  "bottom2": [
+    {"number": "45", "count": 2},
+    {"number": "64", "count": 2}
+  ],
+  "top3": [
+    {"number": "440", "count": 1}
+  ],
+  "digit_frequency": []
+}
+Rules:
+- "bottom2": Read ALL rows from the LEFT table (2 ตัวล่าง). Each row has "เลขที่ออก" (number as string) and "จำนวนครั้งที่ออก" (count as integer)
+- "top3": Read ALL rows from the RIGHT table (3 ตัวบน). Same format.
+- "digit_frequency": if there's a 0-9 frequency table, read it as [{"digit":"0","top3_count":13,"bottom2_count":10,"total":23},...]. Otherwise empty array.
+- Read EVERY row in both tables`;
+
+// ===== GitHub Models (GPT-4o) =====
+
+async function askGitHubModels(prompt, imageBase64) {
+  if (!GITHUB_TOKEN) throw new Error("No GITHUB_TOKEN");
+
+  const body = {
+    model: "openai/gpt-4o",
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: prompt },
+          {
+            type: "image_url",
+            image_url: { url: `data:image/png;base64,${imageBase64}` },
+          },
+        ],
+      },
     ],
+    temperature: 0,
+    max_tokens: 4000,
+  };
+
+  const res = await fetch(GITHUB_MODELS_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${GITHUB_TOKEN}`,
+    },
+    body: JSON.stringify(body),
   });
 
-  const page = await browser.newPage();
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`GitHub Models error ${res.status}: ${errText.slice(0, 300)}`);
+  }
 
-  await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-  );
-  await page.setViewport({ width: 1920, height: 1080 });
+  const data = await res.json();
+  const text = data.choices?.[0]?.message?.content;
+  if (!text) throw new Error("GitHub Models returned empty response");
 
-  // Step 1: โหลดหน้า /calculate/ ก่อน (หน้านี้ผ่าน Cloudflare ได้)
-  console.log(`🔥 Step 1: Loading ${CALCULATE_URL} (Cloudflare warmup)...`);
-  await page.goto(CALCULATE_URL, {
-    waitUntil: "networkidle2",
-    timeout: 120000,
-  });
-  await new Promise((r) => setTimeout(r, 5000));
+  // Parse JSON
+  try {
+    return JSON.parse(text);
+  } catch {
+    const m = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (m) return JSON.parse(m[1].trim());
+    // ลอง extract JSON object
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch) return JSON.parse(jsonMatch[0]);
+    throw new Error(`Cannot parse JSON: ${text.slice(0, 300)}`);
+  }
+}
 
-  const calcTitle = await page.title();
-  console.log(`✅ Calculate page loaded. Title: "${calcTitle}"`);
+// ===== Gemini (fallback) =====
 
-  // Step 2: ใช้ fetch() ภายใน browser context (มี cookies ติดไปด้วย)
-  console.log(`📄 Step 2: Fetching ${targetUrl} from browser context...`);
-  const html = await page.evaluate(async (url) => {
+async function askGemini(prompt, imageBase64, maxRetries = 3) {
+  if (!GEMINI_URL) throw new Error("No GEMINI_API_KEY");
+
+  const body = {
+    contents: [
+      {
+        parts: [
+          { text: prompt },
+          { inline_data: { mime_type: "image/png", data: imageBase64 } },
+        ],
+      },
+    ],
+    generationConfig: { temperature: 0, responseMimeType: "application/json" },
+  };
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const res = await fetch(GEMINI_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    if (res.status === 429) {
+      const waitSec = attempt * 15;
+      console.log(`  ⏳ Rate limited, retrying in ${waitSec}s...`);
+      await new Promise((r) => setTimeout(r, waitSec * 1000));
+      continue;
+    }
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Gemini error ${res.status}: ${errText.slice(0, 300)}`);
+    }
+
+    const data = await res.json();
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) throw new Error("Gemini returned empty response");
+
     try {
-      const res = await fetch(url, {
-        credentials: "include",
-        headers: {
-          Accept: "text/html",
-        },
-      });
-      if (!res.ok) {
-        return { error: `HTTP ${res.status}`, html: "" };
-      }
-      const text = await res.text();
-      return { error: null, html: text };
+      return JSON.parse(text);
+    } catch {
+      const m = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (m) return JSON.parse(m[1].trim());
+      throw new Error(`Cannot parse JSON: ${text.slice(0, 300)}`);
+    }
+  }
+  throw new Error("Gemini: max retries exceeded");
+}
+
+// ===== Generic Vision Call =====
+
+async function readImageWithAI(prompt, imagePath) {
+  const base64 = (await fs.readFile(imagePath)).toString("base64");
+
+  // ลอง GitHub Models ก่อน (ฟรี, ใช้ GITHUB_TOKEN)
+  if (GITHUB_TOKEN) {
+    try {
+      return await askGitHubModels(prompt, base64);
     } catch (e) {
-      return { error: e.message, html: "" };
+      console.log(`  ⚠️ GitHub Models failed: ${e.message.slice(0, 100)}`);
     }
-  }, targetUrl);
-
-  await browser.close();
-
-  if (html.error) {
-    console.log(`⚠️  Fetch error: ${html.error}`);
-    return "";
   }
 
-  console.log(`✅ Got HTML (${html.html.length} bytes)`);
-  return html.html;
-}
+  // ลอง Gemini (ฟรี, ต้อง API key)
+  if (GEMINI_API_KEY) {
+    try {
+      return await askGemini(prompt, base64);
+    } catch (e) {
+      console.log(`  ⚠️ Gemini failed: ${e.message.slice(0, 100)}`);
+    }
+  }
 
-/**
- * Fallback: ใช้ Puppeteer navigate ไปหน้า target โดยตรง
- */
-async function fetchHTMLViaNavigation(targetUrl) {
-  console.log(`\n🌐 Fallback: Direct navigation to ${targetUrl}...`);
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-    ],
-  });
-
-  const page = await browser.newPage();
-  await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+  throw new Error(
+    "ไม่มี AI service ใช้งานได้ ต้องมี GITHUB_TOKEN หรือ GEMINI_API_KEY"
   );
-
-  // โหลดหน้า calculate ก่อน
-  await page.goto(CALCULATE_URL, {
-    waitUntil: "networkidle2",
-    timeout: 120000,
-  });
-  await new Promise((r) => setTimeout(r, 5000));
-
-  // Navigate ไปหน้า target (ภายใน session เดียวกัน)
-  await page.goto(targetUrl, { waitUntil: "networkidle2", timeout: 120000 });
-
-  // รอ Cloudflare (ถ้ามี)
-  for (let i = 0; i < 15; i++) {
-    const title = await page.title();
-    if (
-      !title.includes("รอสักครู่") &&
-      !title.includes("Just a moment") &&
-      title.length > 5
-    ) {
-      console.log(`✅ Page loaded. Title: "${title}"`);
-      break;
-    }
-    console.log(`⏳ Waiting for Cloudflare... (${i + 1}/15)`);
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-
-  await new Promise((r) => setTimeout(r, 3000));
-
-  // ดึงข้อมูลจาก DOM โดยตรง
-  const draws = await page.evaluate(() => {
-    const results = [];
-    const listItems = document.querySelectorAll("li");
-
-    for (const li of listItems) {
-      const link = li.querySelector('a[href*="laosdevelops?date="]');
-      if (!link) continue;
-
-      const dateMatch = link.href.match(/date=(\d{4}-\d{2}-\d{2})/);
-      if (!dateMatch) continue;
-
-      const spans = li.querySelectorAll("span");
-      const numbers = [];
-      for (const span of spans) {
-        const text = span.textContent.trim();
-        if (/^\d{2,3}$/.test(text)) numbers.push(text);
-      }
-
-      const top3 = numbers.find((n) => n.length === 3);
-      const bottom2 = numbers.find((n) => n.length === 2);
-      if (top3 && bottom2) {
-        results.push({ date: dateMatch[1], top3, bottom2 });
-      }
-    }
-
-    return results;
-  });
-
-  await browser.close();
-  return draws;
-}
-
-/**
- * Parse ข้อมูลผลหวย 30 งวดจาก HTML
- */
-function parseDrawResults(html) {
-  const draws = [];
-
-  // Pattern 1: SvelteKit SSR (มี <!--[-->XXX<!--]-->)
-  const regex1 =
-    /href="\/result\/laosdevelops\?date=(\d{4}-\d{2}-\d{2})"[\s\S]*?<!--\[-->(\d{3})<!--\]-->[\s\S]*?<!--\[-->(\d{2})<!--\]-->/g;
-  let match;
-  while ((match = regex1.exec(html)) !== null) {
-    draws.push({ date: match[1], top3: match[2], bottom2: match[3] });
-  }
-
-  // Pattern 2: hydrated DOM (ไม่มี comment markers)
-  if (draws.length === 0) {
-    const regex2 =
-      /href="\/result\/laosdevelops\?date=(\d{4}-\d{2}-\d{2})"[\s\S]*?font-bold[^>]*>\s*(\d{3})\s*<\/span>[\s\S]*?font-bold[^>]*>\s*(\d{2})\s*<\/span>/g;
-    while ((match = regex2.exec(html)) !== null) {
-      draws.push({ date: match[1], top3: match[2], bottom2: match[3] });
-    }
-  }
-
-  console.log(`✅ Parsed ${draws.length} draws from HTML`);
-  return draws;
-}
-
-// ===== สถิติ / คำนวณ =====
-
-function computeDigitFrequency(draws) {
-  const freq = {};
-  for (let d = 0; d <= 9; d++) {
-    freq[d] = { digit: String(d), top3_count: 0, bottom2_count: 0, total: 0 };
-  }
-  for (const draw of draws) {
-    for (const ch of draw.top3) freq[parseInt(ch)].top3_count++;
-    for (const ch of draw.bottom2) freq[parseInt(ch)].bottom2_count++;
-  }
-  for (let d = 0; d <= 9; d++) {
-    freq[d].total = freq[d].top3_count + freq[d].bottom2_count;
-  }
-  return Object.values(freq);
-}
-
-function computeStats30(draws) {
-  const bottom2Count = {};
-  const top3Count = {};
-  for (const draw of draws) {
-    bottom2Count[draw.bottom2] = (bottom2Count[draw.bottom2] || 0) + 1;
-    top3Count[draw.top3] = (top3Count[draw.top3] || 0) + 1;
-  }
-  return {
-    bottom2: Object.entries(bottom2Count)
-      .map(([number, count]) => ({ number, count }))
-      .filter((s) => s.count > 1)
-      .sort((a, b) => b.count - a.count),
-    top3: Object.entries(top3Count)
-      .map(([number, count]) => ({ number, count }))
-      .filter((s) => s.count > 1)
-      .sort((a, b) => b.count - a.count),
-  };
-}
-
-function computeDailyCalculation(draws, digitFrequency) {
-  const sortedDigits = [...digitFrequency].sort((a, b) => b.total - a.total);
-  const runningNumber = sortedDigits[0]?.digit || "";
-  const fullSetNumber = sortedDigits[1]?.digit || "";
-  const topDigits = sortedDigits.slice(0, 5).map((d) => d.digit);
-
-  const top3Set = new Set();
-  const top3Freq = {};
-  for (const draw of draws)
-    top3Freq[draw.top3] = (top3Freq[draw.top3] || 0) + 1;
-  Object.entries(top3Freq)
-    .filter(([, c]) => c > 1)
-    .sort((a, b) => b[1] - a[1])
-    .forEach(([n]) => top3Set.add(n));
-  for (let i = 0; i < topDigits.length && top3Set.size < 10; i++)
-    for (let j = 0; j < topDigits.length && top3Set.size < 10; j++)
-      for (let k = 0; k < topDigits.length && top3Set.size < 10; k++) {
-        const num = topDigits[i] + topDigits[j] + topDigits[k];
-        if (num !== "000") top3Set.add(num);
-      }
-
-  const bottom2Set = new Set();
-  const bottom2Freq = {};
-  for (const draw of draws)
-    bottom2Freq[draw.bottom2] = (bottom2Freq[draw.bottom2] || 0) + 1;
-  Object.entries(bottom2Freq)
-    .filter(([, c]) => c > 1)
-    .sort((a, b) => b[1] - a[1])
-    .forEach(([n]) => bottom2Set.add(n));
-  for (let i = 0; i < topDigits.length && bottom2Set.size < 12; i++)
-    for (let j = 0; j < topDigits.length && bottom2Set.size < 12; j++) {
-      const num = topDigits[i] + topDigits[j];
-      if (num !== "00") bottom2Set.add(num);
-    }
-
-  const recent5 = draws.slice(-5);
-  return {
-    top3: [...top3Set].slice(0, 10),
-    top3_recommended: recent5.map((d) => d.top3),
-    bottom2: [...bottom2Set].slice(0, 12),
-    bottom2_recommended: recent5.map((d) => d.bottom2),
-    running_number: runningNumber,
-    full_set_number: fullSetNumber,
-  };
 }
 
 // ===== Main =====
 
 async function main() {
-  console.log("🚀 Starting scrape...\n");
+  console.log("🚀 Starting image-based data extraction...\n");
 
-  let draws = [];
+  // แสดง available services
+  console.log("🔑 Available AI services:");
+  if (GITHUB_TOKEN) console.log("  ✅ GitHub Models (GITHUB_TOKEN)");
+  else console.log("  ❌ GitHub Models (no GITHUB_TOKEN)");
+  if (GEMINI_API_KEY) console.log("  ✅ Gemini (GEMINI_API_KEY)");
+  else console.log("  ❌ Gemini (no GEMINI_API_KEY)");
 
-  // วิธี 1: โหลด /calculate/ ก่อน แล้ว fetch /result/ จากภายใน browser
-  console.log("=== Strategy 1: Browser-context fetch ===");
-  const resultHtml = await fetchHTMLViaBrowser(RESULT_URL);
-
-  if (resultHtml) {
-    draws = parseDrawResults(resultHtml);
+  if (!GITHUB_TOKEN && !GEMINI_API_KEY) {
+    throw new Error(
+      "ต้องมีอย่างน้อย 1 อย่าง: GITHUB_TOKEN หรือ GEMINI_API_KEY"
+    );
   }
 
-  // วิธี 1 fallback: ลอง backward
-  if (draws.length === 0 && resultHtml !== "") {
-    console.log("\n🔄 Trying backward page...");
-    const backwardHtml = await fetchHTMLViaBrowser(BACKWARD_URL);
-    if (backwardHtml) {
-      draws = parseDrawResults(backwardHtml);
+  // ตรวจไฟล์
+  console.log("\n📁 Images:");
+  for (const img of [CALC_IMG, STAT_IMG]) {
+    try {
+      const s = await fs.stat(img);
+      console.log(`  ${path.basename(img)}: ${(s.size / 1024).toFixed(1)} KB`);
+    } catch {
+      throw new Error(`ไม่พบไฟล์ ${img}`);
     }
   }
 
-  // วิธี 2: navigate ตรงไปหน้า result (ผ่าน session calculate)
-  if (draws.length === 0) {
-    console.log("\n=== Strategy 2: Direct navigation with session ===");
-    draws = await fetchHTMLViaNavigation(RESULT_URL);
-    console.log(`✅ Found ${draws.length} draws via navigation`);
-  }
+  // อ่าน calc.png
+  console.log("\n📊 Reading calc.png...");
+  const calcData = await readImageWithAI(CALC_PROMPT, CALC_IMG);
+  console.log("✅ calc.png:", JSON.stringify(calcData, null, 2));
 
-  // วิธี 2 fallback: ลอง backward
-  if (draws.length === 0) {
-    console.log("\n🔄 Trying backward via navigation...");
-    draws = await fetchHTMLViaNavigation(BACKWARD_URL);
-    console.log(`✅ Found ${draws.length} draws via navigation (backward)`);
-  }
+  // รอ 5 วินาทีก่อนส่ง request ถัดไป
+  console.log("\n⏳ Waiting 5s...\n");
+  await new Promise((r) => setTimeout(r, 5000));
 
-  if (draws.length === 0) {
-    throw new Error("ไม่พบข้อมูลผลหวยจากทุกวิธี");
-  }
+  // อ่าน stat.png
+  console.log("📊 Reading stat.png...");
+  const statData = await readImageWithAI(STAT_PROMPT, STAT_IMG);
+  console.log("✅ stat.png:");
+  console.log(`  bottom2: ${statData.bottom2?.length || 0} entries`);
+  console.log(`  top3: ${statData.top3?.length || 0} entries`);
 
-  // เรียงลำดับจากเก่าไปใหม่
-  draws.sort((a, b) => a.date.localeCompare(b.date));
-
-  console.log("\n📊 5 งวดล่าสุด:");
-  for (const d of draws.slice(-5)) {
-    console.log(`  ${d.date}: 3 ตัวบน=${d.top3}, 2 ตัวล่าง=${d.bottom2}`);
-  }
-
-  const digitFrequency = computeDigitFrequency(draws);
-  const stats30 = computeStats30(draws);
-  const dailyCalc = computeDailyCalculation(draws, digitFrequency);
-
+  // สร้าง output
   const result = {
     lottery: "laos_develops",
     lottery_name: "หวยลาวพัฒนา",
-    source_url: RESULT_URL,
+    source_url: "https://exphuay.com/calculate/laosdevelops",
     fetched_at: nowISO(),
-    window: { latest_n_draws: draws.length },
-    latest_draw: draws[draws.length - 1] || null,
-    draws,
-    daily_calculation: dailyCalc,
-    digit_frequency: { data: digitFrequency },
-    statistics_30_draws: stats30,
-    notes: "ดึงข้อมูลจาก /result/laosdevelops แล้วคำนวณสถิติเอง",
+    window: { latest_n_draws: 30 },
+    daily_calculation: {
+      top3: calcData.top3 || [],
+      top3_recommended: calcData.top3_recommended || [],
+      bottom2: calcData.bottom2 || [],
+      bottom2_recommended: calcData.bottom2_recommended || [],
+      running_number: calcData.running_number || "",
+      full_set_number: calcData.full_set_number || "",
+    },
+    digit_frequency: {
+      data: statData.digit_frequency || [],
+    },
+    statistics_30_draws: {
+      bottom2: statData.bottom2 || [],
+      top3: statData.top3 || [],
+    },
+    notes: "อ่านข้อมูลจากรูป calc.png + stat.png ด้วย AI Vision",
   };
 
   await fs.mkdir("public", { recursive: true });
@@ -340,7 +269,6 @@ async function main() {
   );
 
   console.log("\n✅ public/laos_develops.json updated");
-  console.log(`📊 Total draws: ${draws.length}`);
   console.log(JSON.stringify(result, null, 2));
 }
 
