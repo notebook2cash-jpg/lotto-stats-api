@@ -3,6 +3,6 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "puppeteer": "^24.41.0"
+    "puppeteer": "^24.42.0"
   }
 }
