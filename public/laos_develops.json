@@ -2,7 +2,7 @@
   "lottery": "laos_develops",
   "lottery_name": "หวยลาวพัฒนา",
   "source_url": "https://exphuay.com/calculate/laosdevelops",
-  "fetched_at": "2026-05-20T17:48:49.759Z",
+  "fetched_at": "2026-05-22T17:10:26.789Z",
   "window": {
     "latest_n_draws": 30
   },
@@ -49,10 +49,6 @@
       },
       {
         "number": "34",
-        "count": 1
-      },
-      {
-        "number": "37",
         "count": 1
       },
       {
